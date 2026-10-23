@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# media files (over GitHub 100MB limit)
+*.mp4
+*.mp3
+*.wav
+*.mov
+*.mkv
+*.webm
+
+# scratch scripts
+scripts/
