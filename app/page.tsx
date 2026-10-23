@@ -302,6 +302,7 @@ export default function Home() {
           <div className="lg:col-span-5 xl:col-span-5 space-y-4">
             <MediaPlayer
               activeSegment={activeSegment}
+              totalSegmentsCount={segments.length}
               currentTime={currentTime}
               duration={duration}
               isPlaying={isPlaying}

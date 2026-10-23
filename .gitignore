@@ -48,8 +48,10 @@ next-env.d.ts
 *.mkv
 *.webm
 
-# Whitelist optimized app audio
+# Whitelist optimized app audio & preloaded segment clips
 !public/audio/gorusme.mp3
+!public/audio/segments/
+!public/audio/segments/*.mp3
 
 # scratch scripts
 scripts/
