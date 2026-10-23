@@ -64,27 +64,18 @@ export default function Home() {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  // Find active segment based on current playback time
-  const activeSegment = useMemo(() => {
-    // 1. Exact range hit
-    const match = segments.find(
-      (s) => currentTime >= s.startTime && currentTime <= s.endTime
-    );
-    if (match) return match;
+  const [currentSegmentId, setCurrentSegmentId] = useState<number>(1);
 
-    // 2. Fallback: closest segment
-    for (let i = segments.length - 1; i >= 0; i--) {
-      if (currentTime >= segments[i].startTime) {
-        return segments[i];
-      }
-    }
-    return segments[0] || null;
-  }, [segments, currentTime]);
+  // Active segment determined explicitly by currentSegmentId
+  const activeSegment = useMemo(() => {
+    return segments.find((s) => s.id === currentSegmentId) || segments[0] || null;
+  }, [segments, currentSegmentId]);
 
   const activeSegmentId = activeSegment ? activeSegment.id : null;
 
   // Segment Selection / Jump
   const handleSelectSegment = useCallback((segment: SubtitleSegment, playImmediately = true) => {
+    setCurrentSegmentId(segment.id);
     setCurrentTime(segment.startTime);
     if (playImmediately) {
       setIsPlaying(true);
@@ -93,6 +84,7 @@ export default function Home() {
 
   // REPLAY CURRENT SEGMENT (Tekrar Dinle)
   const handleReplaySegment = useCallback((segment: SubtitleSegment) => {
+    setCurrentSegmentId(segment.id);
     setCurrentTime(segment.startTime);
     setIsPlaying(true);
     showToast(`"${segment.speaker}" cümlesi tekrar çalınıyor...`);
@@ -107,6 +99,7 @@ export default function Home() {
     const currentIndex = segments.findIndex((s) => s.id === segment.id);
     if (currentIndex >= 0 && currentIndex < segments.length - 1) {
       const nextSeg = segments[currentIndex + 1];
+      setCurrentSegmentId(nextSeg.id);
       setCurrentTime(nextSeg.startTime);
       setIsPlaying(true);
       showToast(`Cümle #${segment.id} onaylandı. Sonraki cümleye geçildi.`);

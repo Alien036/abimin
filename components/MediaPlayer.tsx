@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { SubtitleSegment } from '../lib/initialData';
 import { secondsToTimeStr } from '../lib/transcriptUtils';
+import { audioManager } from '../lib/audioManager';
 
 interface MediaPlayerProps {
   activeSegment: SubtitleSegment | null;
@@ -81,11 +82,11 @@ export default function MediaPlayer({
   onToggleStepByStep
 }: MediaPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const continuousAudioRef = useRef<HTMLAudioElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Playback mode: 'segment' (ultra-fast individual clips with preloading) vs 'continuous'
+  // Playback mode: 'segment' (ultra-fast preloaded memory audio) vs 'continuous'
   const [engineMode, setEngineMode] = useState<'segment' | 'continuous'>('segment');
   const [customMediaSrc, setCustomMediaSrc] = useState<string | null>(null);
   const [customMediaType, setCustomMediaType] = useState<'video' | 'audio' | null>(null);
@@ -95,52 +96,47 @@ export default function MediaPlayer({
   const [volume, setVolume] = useState<number>(1.0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [showSubtitleOverlay, setShowSubtitleOverlay] = useState<boolean>(true);
-  const [nextPreloadedId, setNextPreloadedId] = useState<number | null>(null);
   const [segmentLocalTime, setSegmentLocalTime] = useState<number>(0);
   const [segmentEnded, setSegmentEnded] = useState<boolean>(false);
 
-  // PRELOAD NEXT SEGMENTS IN THE BACKGROUND ("Bu sesi dinlerken sonraki hazır olsun")
-  useEffect(() => {
-    if (engineMode === 'segment' && activeSegment) {
-      const nextId = activeSegment.id + 1;
-      const nextNextId = activeSegment.id + 2;
-
-      if (nextId <= totalSegmentsCount) {
-        // Preload next segment into browser cache
-        const audioNext = new Audio();
-        audioNext.preload = 'auto';
-        audioNext.src = `/audio/segments/${nextId}.mp3`;
-        setNextPreloadedId(nextId);
+  // Play active segment via audioManager when triggered
+  const playActiveSegmentAudio = useCallback((seg: SubtitleSegment) => {
+    setSegmentEnded(false);
+    audioManager.playSegment(seg.id, {
+      playbackRate,
+      volume: isMuted ? 0 : volume,
+      onEnded: () => {
+        setSegmentEnded(true);
+        if (isLoopingSegment) {
+          audioManager.replay();
+        } else if (stepByStepMode) {
+          onPause();
+          onTimeUpdate(seg.endTime);
+        } else {
+          onVerifyAndNext(seg);
+        }
+      },
+      onTimeUpdate: (curr) => {
+        setSegmentLocalTime(curr);
+        onTimeUpdate(seg.startTime + curr);
       }
+    });
+  }, [playbackRate, volume, isMuted, isLoopingSegment, stepByStepMode, onPause, onTimeUpdate, onVerifyAndNext]);
 
-      if (nextNextId <= totalSegmentsCount) {
-        const audioNextNext = new Audio();
-        audioNextNext.preload = 'auto';
-        audioNextNext.src = `/audio/segments/${nextNextId}.mp3`;
-      }
-    }
-  }, [engineMode, activeSegment, totalSegmentsCount]);
-
-  // Handle active segment change in 'segment' engine mode
+  // When active segment changes and isPlaying is true, play immediately from memory
   useEffect(() => {
     if (engineMode === 'segment' && activeSegment && !customMediaSrc) {
-      const segAudio = audioRef.current;
-      if (segAudio) {
-        const expectedSrc = `/audio/segments/${activeSegment.id}.mp3`;
-        if (!segAudio.src.endsWith(expectedSrc)) {
-          segAudio.src = expectedSrc;
-          segAudio.currentTime = 0;
-          setSegmentEnded(false);
-          setSegmentLocalTime(0);
-          if (isPlaying) {
-            segAudio.play().catch(() => {});
-          }
-        }
+      // Preload current and next 4 segments immediately
+      audioManager.preload(activeSegment.id);
+      audioManager.preloadAhead(activeSegment.id, 4);
+
+      if (isPlaying) {
+        playActiveSegmentAudio(activeSegment);
       }
     }
-  }, [activeSegment, engineMode, customMediaSrc, isPlaying]);
+  }, [activeSegment?.id, engineMode, customMediaSrc, isPlaying, playActiveSegmentAudio]);
 
-  // Audio Visualizer effect
+  // Canvas visualizer animation
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -214,27 +210,27 @@ export default function MediaPlayer({
   const handlePlay = useCallback(() => {
     if (customMediaType === 'video' && videoRef.current) {
       videoRef.current.play().catch(() => {});
-    } else if (audioRef.current) {
-      if (segmentEnded && engineMode === 'segment') {
-        audioRef.current.currentTime = 0;
-        setSegmentEnded(false);
-      }
-      audioRef.current.play().catch(() => {});
+    } else if (engineMode === 'continuous' && continuousAudioRef.current) {
+      continuousAudioRef.current.play().catch(() => {});
+    } else if (engineMode === 'segment' && activeSegment) {
+      playActiveSegmentAudio(activeSegment);
     }
     onPlay();
-  }, [customMediaType, segmentEnded, engineMode, onPlay]);
+  }, [customMediaType, engineMode, activeSegment, playActiveSegmentAudio, onPlay]);
 
   const handlePause = useCallback(() => {
     if (customMediaType === 'video' && videoRef.current) {
       videoRef.current.pause();
-    } else if (audioRef.current) {
-      audioRef.current.pause();
+    } else if (engineMode === 'continuous' && continuousAudioRef.current) {
+      continuousAudioRef.current.pause();
+    } else if (engineMode === 'segment') {
+      audioManager.pause();
     }
     onPause();
-  }, [customMediaType, onPause]);
+  }, [customMediaType, engineMode, onPause]);
 
   const handlePlayPause = () => {
-    if (isPlaying) {
+    if (isPlaying && !segmentEnded) {
       handlePause();
     } else {
       handlePlay();
@@ -247,71 +243,40 @@ export default function MediaPlayer({
     if (engineMode === 'continuous') {
       if (customMediaType === 'video' && videoRef.current) {
         videoRef.current.currentTime = clamped;
-      } else if (audioRef.current) {
-        audioRef.current.currentTime = clamped;
+      } else if (continuousAudioRef.current) {
+        continuousAudioRef.current.currentTime = clamped;
       }
     }
   };
 
   const handleSpeedChange = (rate: number) => {
     setPlaybackRate(rate);
+    audioManager.setPlaybackRate(rate);
     if (videoRef.current) videoRef.current.playbackRate = rate;
-    if (audioRef.current) audioRef.current.playbackRate = rate;
+    if (continuousAudioRef.current) continuousAudioRef.current.playbackRate = rate;
   };
 
   const handleVolumeChange = (newVol: number) => {
     setVolume(newVol);
     setIsMuted(newVol === 0);
+    audioManager.setVolume(newVol);
     if (videoRef.current) videoRef.current.volume = newVol;
-    if (audioRef.current) audioRef.current.volume = newVol;
+    if (continuousAudioRef.current) continuousAudioRef.current.volume = newVol;
   };
 
   const toggleMute = () => {
     const next = !isMuted;
     setIsMuted(next);
     const targetVol = next ? 0 : (volume || 1);
+    audioManager.setVolume(targetVol);
     if (videoRef.current) videoRef.current.volume = targetVol;
-    if (audioRef.current) audioRef.current.volume = targetVol;
+    if (continuousAudioRef.current) continuousAudioRef.current.volume = targetVol;
   };
 
-  // When segment audio is playing, update global timeline and local segment progress
-  const handleAudioTimeUpdate = (e: React.SyntheticEvent<HTMLAudioElement>) => {
-    const audio = e.currentTarget;
-    if (engineMode === 'segment' && activeSegment) {
-      setSegmentLocalTime(audio.currentTime);
-      const absTime = activeSegment.startTime + audio.currentTime;
-      onTimeUpdate(absTime);
-    } else {
-      onTimeUpdate(audio.currentTime);
-    }
-  };
-
-  // When individual segment audio ends
-  const handleAudioEnded = () => {
-    if (engineMode === 'segment' && activeSegment) {
-      setSegmentEnded(true);
-      if (isLoopingSegment) {
-        if (audioRef.current) {
-          audioRef.current.currentTime = 0;
-          audioRef.current.play().catch(() => {});
-        }
-      } else if (stepByStepMode) {
-        // Stop automatically and prompt for confirmation!
-        handlePause();
-        onTimeUpdate(activeSegment.endTime);
-      } else {
-        // In auto-advance mode, advance immediately to next preloaded segment
-        onVerifyAndNext(activeSegment);
-      }
-    }
-  };
-
-  // Immediate Instant Replay (Zero delay)
+  // Instant zero-latency replay
   const handleInstantReplay = () => {
-    setSegmentEnded(false);
-    if (engineMode === 'segment' && audioRef.current) {
-      audioRef.current.currentTime = 0;
-      audioRef.current.play().catch(() => {});
+    if (engineMode === 'segment' && activeSegment) {
+      playActiveSegmentAudio(activeSegment);
       onPlay();
     } else if (activeSegment) {
       onReplaySegment(activeSegment);
@@ -320,8 +285,7 @@ export default function MediaPlayer({
 
   const maxDuration = duration > 0 ? duration : 2583;
   const progressRatio = Math.min(1, Math.max(0, currentTime / maxDuration));
-  const segmentDuration = activeSegment ? Math.max(1, activeSegment.endTime - activeSegment.startTime) : 1;
-  const segmentProgress = Math.min(1, Math.max(0, segmentLocalTime / segmentDuration));
+  const nextSegmentId = activeSegment ? Math.min(totalSegmentsCount, activeSegment.id + 1) : null;
 
   return (
     <div
@@ -356,27 +320,22 @@ export default function MediaPlayer({
           />
         )}
 
-        {/* Audio Mode: Either Segment Micro-Clip or Continuous Audio */}
+        {/* Audio Mode */}
         {customMediaType !== 'video' && (
           <div className="relative w-full h-full flex flex-col items-center justify-center p-6 bg-gradient-to-b from-slate-900/60 via-slate-950 to-slate-900">
             
-            {/* The Audio Element */}
-            <audio
-              ref={audioRef}
-              src={
-                customMediaSrc
-                  ? customMediaSrc
-                  : engineMode === 'segment' && activeSegment
-                  ? `/audio/segments/${activeSegment.id}.mp3`
-                  : '/audio/gorusme.mp3'
-              }
-              onTimeUpdate={handleAudioTimeUpdate}
-              onEnded={handleAudioEnded}
-              onPlay={onPlay}
-              onPause={onPause}
-              preload="auto"
-              className="hidden"
-            />
+            {/* Fallback Continuous Audio Element */}
+            {engineMode === 'continuous' && (
+              <audio
+                ref={continuousAudioRef}
+                src={customMediaSrc || '/audio/gorusme.mp3'}
+                onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
+                onPlay={onPlay}
+                onPause={onPause}
+                preload="auto"
+                className="hidden"
+              />
+            )}
 
             {/* Ambient Background Glow */}
             <div className={`absolute inset-0 opacity-20 blur-3xl transition-colors duration-700 pointer-events-none ${
@@ -408,10 +367,10 @@ export default function MediaPlayer({
                   {activeSegment.speaker} ({activeSegment.startStr} - {activeSegment.endStr})
                 </span>
 
-                {engineMode === 'segment' && nextPreloadedId && (
-                  <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 flex items-center gap-1 shadow-sm animate-pulse">
+                {engineMode === 'segment' && nextSegmentId && (
+                  <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 flex items-center gap-1 shadow-sm">
                     <Zap className="w-3 h-3 text-emerald-400" />
-                    Sonraki Cümle (# {nextPreloadedId}) Hazır
+                    Sonraki Cümle (# {nextSegmentId}) Bellekte Hazır
                   </span>
                 )}
               </div>
@@ -531,7 +490,6 @@ export default function MediaPlayer({
         
         {/* Left: Playback Actions */}
         <div className="flex items-center gap-1.5 sm:gap-2">
-          {/* Prev Segment */}
           <button
             onClick={onPrevSegment}
             title="Önceki Cümleye Git (Yukarı Ok)"
@@ -540,7 +498,6 @@ export default function MediaPlayer({
             <ChevronLeft className="w-4 h-4" />
           </button>
 
-          {/* Jump -5s */}
           <button
             onClick={() => handleSeek(currentTime - 5)}
             title="5 Saniye Geri (Sol Ok)"
@@ -558,7 +515,6 @@ export default function MediaPlayer({
             {isPlaying && !segmentEnded ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
           </button>
 
-          {/* Jump +5s */}
           <button
             onClick={() => handleSeek(currentTime + 5)}
             title="5 Saniye İleri (Sağ Ok)"
@@ -567,7 +523,6 @@ export default function MediaPlayer({
             <RotateCw className="w-4 h-4" />
           </button>
 
-          {/* Next Segment */}
           <button
             onClick={onNextSegment}
             title="Sonraki Cümleye Git (Aşağı Ok)"
@@ -586,10 +541,9 @@ export default function MediaPlayer({
             <span>Tekrar Dinle</span>
           </button>
 
-          {/* Loop Current Segment */}
           <button
             onClick={onToggleLoopSegment}
-            title="Aktif Cümleyi Sürekli Tekrarla / Döngüye Al (Kısayol: L)"
+            title="Aktif Cümleyi Sürekli Tekrarla (Kısayol: L)"
             className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition flex items-center gap-1.5 ${
               isLoopingSegment
                 ? 'bg-blue-500/20 text-blue-400 border-blue-500/40 shadow-sm shadow-blue-500/20 animate-pulse'
@@ -620,7 +574,6 @@ export default function MediaPlayer({
 
         {/* Right: Mode Toggles & Volume */}
         <div className="flex items-center gap-3">
-          {/* Step-by-Step Mode Toggle */}
           <button
             onClick={onToggleStepByStep}
             title="Cümle Bittiğinde Dur ve Onay Bekle Modu"
@@ -634,10 +587,9 @@ export default function MediaPlayer({
             <span>Adım Adım</span>
           </button>
 
-          {/* Auto-scroll Toggle */}
           <button
             onClick={onToggleAutoScroll}
-            title="Listeyi Otomatik Takip Et (Aktif Cümleye Kaydır)"
+            title="Listeyi Otomatik Takip Et"
             className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition flex items-center gap-1.5 ${
               autoScroll
                 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
@@ -648,7 +600,6 @@ export default function MediaPlayer({
             <span className="hidden md:inline">Oto-Kaydır</span>
           </button>
 
-          {/* Volume Control */}
           <div className="flex items-center gap-1.5">
             <button
               onClick={toggleMute}
@@ -675,7 +626,7 @@ export default function MediaPlayer({
 
       </div>
 
-      {/* DEDICATED GUIDED REVIEW & REPLAY PANEL (Visible when active segment is selected) */}
+      {/* DEDICATED GUIDED REVIEW & REPLAY PANEL */}
       {activeSegment && (
         <div className={`p-4 border-t transition-all ${
           segmentEnded
@@ -694,9 +645,8 @@ export default function MediaPlayer({
               </span>
             </div>
             
-            {/* Real-time preloading status badge */}
             <div className="flex items-center gap-2 text-xs font-mono">
-              {engineMode === 'segment' && nextPreloadedId && (
+              {engineMode === 'segment' && nextSegmentId && (
                 <span className="text-emerald-400 font-sans font-medium flex items-center gap-1 bg-emerald-950/70 px-2 py-0.5 rounded border border-emerald-500/30">
                   <Zap className="w-3 h-3" /> Sonraki ses hazır
                 </span>
@@ -734,8 +684,6 @@ export default function MediaPlayer({
 
           {/* Action Buttons: TEKRAR DİNLE, ONAYLA & İLERLE, METNİ DÜZELT */}
           <div className="flex flex-wrap items-center gap-2">
-            
-            {/* Tekrar Dinle Button (Zero Latency Instant Replay) */}
             <button
               onClick={handleInstantReplay}
               className="flex-1 min-w-[130px] px-3.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/30 transition transform active:scale-95"
@@ -744,7 +692,6 @@ export default function MediaPlayer({
               <span>Tekrar Dinle</span>
             </button>
 
-            {/* Onayla ve Sonrakine Geç */}
             <button
               onClick={() => onVerifyAndNext(activeSegment)}
               className="flex-1 min-w-[150px] px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition transform active:scale-95"
@@ -753,7 +700,6 @@ export default function MediaPlayer({
               <span>Onayla & Sonrakine Geç</span>
             </button>
 
-            {/* Metni Düzelt */}
             <button
               onClick={() => onStartEditSegment(activeSegment)}
               className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition flex items-center gap-1.5"
@@ -762,16 +708,14 @@ export default function MediaPlayer({
               <span>Metni Düzelt</span>
             </button>
 
-            {/* Şüpheli Olarak İşaretle */}
             <button
               onClick={() => onFlagSegment(activeSegment.id)}
               className="px-3 py-2.5 rounded-xl bg-amber-950/40 hover:bg-amber-600 hover:text-white text-amber-300 border border-amber-500/30 text-xs font-medium transition flex items-center gap-1.5"
-              title="Şüpheli / Emin Olunamadı olarak işaretle"
+              title="Şüpheli olarak işaretle"
             >
               <AlertTriangle className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Şüpheli</span>
             </button>
-
           </div>
         </div>
       )}
@@ -781,7 +725,7 @@ export default function MediaPlayer({
         <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-emerald-400" />
           <span>
-            Hızlı Cümle Modu Aktif: Her cümle ayrı küçük ses klibi olarak yüklenir, dinlerken bir sonraki ses arka planda hazır bekler.
+            Hızlı Cümle Modu Aktif: 189 cümle bağımsız mikro-klipler halinde belleğe ön-yüklenir, gecikmesiz çalar.
           </span>
         </div>
         <button
