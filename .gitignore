@@ -48,5 +48,8 @@ next-env.d.ts
 *.mkv
 *.webm
 
+# Whitelist optimized app audio
+!public/audio/gorusme.mp3
+
 # scratch scripts
 scripts/

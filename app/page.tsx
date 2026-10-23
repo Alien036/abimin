@@ -8,7 +8,7 @@ import ExportModal from '../components/ExportModal';
 import KeyboardShortcutsModal from '../components/KeyboardShortcutsModal';
 import { DEFAULT_TRANSCRIPT_DATA, SubtitleSegment, TranscriptMetadata } from '../lib/initialData';
 import { parseMarkdownTranscript } from '../lib/transcriptUtils';
-import { Info, Sparkles, CheckCircle2, ShieldCheck, HeartHandshake, Film } from 'lucide-react';
+import { Info, Sparkles, CheckCircle2, ShieldCheck } from 'lucide-react';
 
 export default function Home() {
   const [metadata, setMetadata] = useState<TranscriptMetadata>(DEFAULT_TRANSCRIPT_DATA);
@@ -22,8 +22,10 @@ export default function Home() {
   const [isLoopingSegment, setIsLoopingSegment] = useState<boolean>(false);
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [isSticky, setIsSticky] = useState<boolean>(false);
+  const [stepByStepMode, setStepByStepMode] = useState<boolean>(true); // Active by default!
+  const [editingSegmentId, setEditingSegmentId] = useState<number | null>(null);
 
-  // Modals
+  // Modals & Feedback
   const [isExportOpen, setIsExportOpen] = useState<boolean>(false);
   const [isShortcutsOpen, setIsShortcutsOpen] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -32,8 +34,8 @@ export default function Home() {
   useEffect(() => {
     setIsClient(true);
     try {
-      const savedSegments = localStorage.getItem('psiko_sync_segments_v2');
-      const savedMeta = localStorage.getItem('psiko_sync_meta_v2');
+      const savedSegments = localStorage.getItem('psiko_sync_segments_v3');
+      const savedMeta = localStorage.getItem('psiko_sync_meta_v3');
       if (savedSegments) {
         setSegments(JSON.parse(savedSegments));
       }
@@ -49,8 +51,8 @@ export default function Home() {
   useEffect(() => {
     if (isClient) {
       try {
-        localStorage.setItem('psiko_sync_segments_v2', JSON.stringify(segments));
-        localStorage.setItem('psiko_sync_meta_v2', JSON.stringify(metadata));
+        localStorage.setItem('psiko_sync_segments_v3', JSON.stringify(segments));
+        localStorage.setItem('psiko_sync_meta_v3', JSON.stringify(metadata));
       } catch (e) {
         console.error('Failed to save state:', e);
       }
@@ -64,13 +66,13 @@ export default function Home() {
 
   // Find active segment based on current playback time
   const activeSegment = useMemo(() => {
-    // 1. Direct hit inside interval
+    // 1. Exact range hit
     const match = segments.find(
       (s) => currentTime >= s.startTime && currentTime <= s.endTime
     );
     if (match) return match;
 
-    // 2. Fallback: closest previous segment
+    // 2. Fallback: closest segment
     for (let i = segments.length - 1; i >= 0; i--) {
       if (currentTime >= segments[i].startTime) {
         return segments[i];
@@ -87,6 +89,39 @@ export default function Home() {
     if (playImmediately) {
       setIsPlaying(true);
     }
+  }, []);
+
+  // REPLAY CURRENT SEGMENT (Tekrar Dinle)
+  const handleReplaySegment = useCallback((segment: SubtitleSegment) => {
+    setCurrentTime(segment.startTime);
+    setIsPlaying(true);
+    showToast(`"${segment.speaker}" cümlesi tekrar çalınıyor...`);
+  }, []);
+
+  // VERIFY & ADVANCE TO NEXT SEGMENT (Onayla ve İlerle)
+  const handleVerifyAndNext = useCallback((segment: SubtitleSegment) => {
+    setSegments((prev) =>
+      prev.map((s) => (s.id === segment.id ? { ...s, status: 'verified' } : s))
+    );
+
+    const currentIndex = segments.findIndex((s) => s.id === segment.id);
+    if (currentIndex >= 0 && currentIndex < segments.length - 1) {
+      const nextSeg = segments[currentIndex + 1];
+      setCurrentTime(nextSeg.startTime);
+      setIsPlaying(true);
+      showToast(`Cümle #${segment.id} onaylandı. Sonraki cümleye geçildi.`);
+    } else {
+      setIsPlaying(false);
+      showToast('🎉 Tebrikler! Tüm görüşme cümleleri başarıyla doğrulandı!');
+    }
+  }, [segments]);
+
+  // FLAG SEGMENT (Şüpheli)
+  const handleFlagSegment = useCallback((id: number) => {
+    setSegments((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, status: 'flagged' } : s))
+    );
+    showToast(`Cümle #${id} şüpheli olarak işaretlendi.`);
   }, []);
 
   // Previous & Next Segment navigation
@@ -151,8 +186,8 @@ export default function Home() {
       setSegments(DEFAULT_TRANSCRIPT_DATA.segments);
       setMetadata(DEFAULT_TRANSCRIPT_DATA);
       try {
-        localStorage.removeItem('psiko_sync_segments_v2');
-        localStorage.removeItem('psiko_sync_meta_v2');
+        localStorage.removeItem('psiko_sync_segments_v3');
+        localStorage.removeItem('psiko_sync_meta_v3');
       } catch (e) {}
       showToast('Transkript başarıyla sıfırlandı');
     }
@@ -186,7 +221,6 @@ export default function Home() {
   // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't intercept if user is typing in input or textarea
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
         return;
@@ -207,6 +241,9 @@ export default function Home() {
       } else if (e.code === 'ArrowDown') {
         e.preventDefault();
         handleNextSegment();
+      } else if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        if (activeSegment) handleReplaySegment(activeSegment);
       } else if (e.key === 'l' || e.key === 'L') {
         e.preventDefault();
         setIsLoopingSegment((prev) => !prev);
@@ -218,7 +255,7 @@ export default function Home() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [duration, handlePrevSegment, handleNextSegment]);
+  }, [duration, handlePrevSegment, handleNextSegment, activeSegment, handleReplaySegment]);
 
   return (
     <div className="min-h-screen flex flex-col bg-[#090d16] text-slate-100">
@@ -242,17 +279,19 @@ export default function Home() {
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
               <h2 className="text-sm sm:text-base font-bold text-slate-100">
-                Görüşme Detayları & Doğrulama Akışı
+                Görüşme Kaydı & Adım Adım Doğrulama Sistemi
               </h2>
             </div>
             <p className="text-xs text-slate-400">
-              Dosya: <code className="text-blue-300 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-800/40">{metadata.fileName}</code> • Toplam Süre: <span className="text-slate-200 font-semibold">{metadata.duration}</span> • Katılımcılar: <span className="text-slate-300">{metadata.speakers}</span>
+              Ses Kaydı: <code className="text-emerald-300 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">Görüşme Ses Kaydı (43:03 - Yüklendi)</code> • Katılımcılar: <span className="text-slate-300">{metadata.speakers}</span>
             </p>
           </div>
 
-          <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-900/80 px-3 py-1.5 rounded-xl border border-slate-800">
-            <Info className="w-4 h-4 text-blue-400 shrink-0" />
-            <span>Videoyu oynatın; her diyalog senkronize akar. Metinleri çift tıklayarak düzeltebilirsiniz.</span>
+          <div className="flex items-center gap-2 text-xs text-slate-300 bg-slate-900/90 px-3.5 py-2 rounded-xl border border-slate-700/80 shadow-sm">
+            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>
+              <strong>Onaylı Doğrulama:</strong> Cümle bittiğinde duraklar; onaylamadan veya tekrar dinlemeden ilerlemez.
+            </span>
           </div>
         </div>
 
@@ -272,32 +311,35 @@ export default function Home() {
               onSeek={(t) => setCurrentTime(t)}
               onPrevSegment={handlePrevSegment}
               onNextSegment={handleNextSegment}
+              onReplaySegment={handleReplaySegment}
+              onVerifyAndNext={handleVerifyAndNext}
+              onFlagSegment={handleFlagSegment}
+              onStartEditSegment={(seg) => setEditingSegmentId(seg.id)}
               isLoopingSegment={isLoopingSegment}
               onToggleLoopSegment={() => setIsLoopingSegment(!isLoopingSegment)}
               autoScroll={autoScroll}
               onToggleAutoScroll={() => setAutoScroll(!autoScroll)}
               isSticky={isSticky}
               onToggleSticky={() => setIsSticky(!isSticky)}
+              stepByStepMode={stepByStepMode}
+              onToggleStepByStep={() => setStepByStepMode(!stepByStepMode)}
             />
 
             {/* Quick Tips & Workflow Guide */}
             <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800/80 text-xs space-y-2.5 text-slate-400">
               <h4 className="font-semibold text-slate-300 flex items-center gap-1.5">
                 <Sparkles className="w-4 h-4 text-amber-400" />
-                Hızlı Doğrulama İpuçları
+                Nasıl Doğrulanır?
               </h4>
               <ul className="space-y-1.5 list-disc list-inside">
                 <li>
-                  <strong className="text-slate-200">Video Yükleme:</strong> Oynatıcıdaki <span className="text-blue-400 font-medium">&quot;Dosya Seç&quot;</span> butonuyla bilgisayarınızdaki videoyu veya ses kaydını seçebilirsiniz. Dosya sunucuya yüklenmez, tarayıcınızda doğrudan şifresiz ve anında çalışır.
+                  <strong className="text-slate-200">Tekrar Dinleme:</strong> Anlaşılmayan veya şüpheli cümlelerde <span className="text-indigo-400 font-semibold">&quot;Tekrar Dinle&quot;</span> butonuna (veya klavyede <kbd className="px-1 rounded bg-slate-800 text-slate-300 font-mono">R</kbd>) basarak cümleyi baştan dinleyebilirsiniz.
                 </li>
                 <li>
-                  <strong className="text-slate-200">Zaman Damgalarına Tıklama:</strong> Herhangi bir cümlenin saatine tıkladığınızda video tam o saniyeye atlar.
+                  <strong className="text-slate-200">Onay & İlerleme:</strong> Cümle bittiğinde <span className="text-emerald-400 font-semibold">&quot;Onayla & Sonrakine Geç&quot;</span> butonu ile onaylayıp bir sonraki cümleye geçebilirsiniz.
                 </li>
                 <li>
-                  <strong className="text-slate-200">Cümleyi Döngüle:</strong> Anlaşılması zor kısımlarda <span className="text-blue-400 font-medium">&quot;Cümleyi Döngüle (L)&quot;</span> butonuna basarak aynı cümleyi tekrar tekrar dinleyebilirsiniz.
-                </li>
-                <li>
-                  <strong className="text-slate-200">Onayla & İlerle:</strong> Yeşil onay butonuna bastığınızda cümle onaylanır ve otomatik olarak bir sonraki cümleye geçer.
+                  <strong className="text-slate-200">Hatalı Kelimeleri Düzeltme:</strong> Herhangi bir cümlenin üzerine çift tıklayarak veya <span className="text-blue-400 font-semibold">&quot;Metni Düzelt&quot;</span> butonuna basarak anında yazıyı güncelleyebilirsiniz.
                 </li>
               </ul>
             </div>
@@ -309,10 +351,14 @@ export default function Home() {
               segments={segments}
               activeSegmentId={activeSegmentId}
               onSelectSegment={handleSelectSegment}
+              onReplaySegment={handleReplaySegment}
+              onVerifyAndNext={handleVerifyAndNext}
               onUpdateSegmentText={handleUpdateSegmentText}
               onUpdateSegmentStatus={handleUpdateSegmentStatus}
               onRevertSegment={handleRevertSegment}
               autoScroll={autoScroll}
+              editingSegmentId={editingSegmentId}
+              onClearEditingSegmentId={() => setEditingSegmentId(null)}
             />
           </div>
 

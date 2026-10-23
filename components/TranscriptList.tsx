@@ -12,11 +12,7 @@ import {
   User,
   MessageSquare,
   Volume2,
-  SlidersHorizontal,
-  ChevronDown,
-  ChevronUp,
   X,
-  Sparkles,
   ArrowRight
 } from 'lucide-react';
 import { SubtitleSegment } from '../lib/initialData';
@@ -25,20 +21,28 @@ interface TranscriptListProps {
   segments: SubtitleSegment[];
   activeSegmentId: number | null;
   onSelectSegment: (segment: SubtitleSegment, playImmediately?: boolean) => void;
+  onReplaySegment: (segment: SubtitleSegment) => void;
+  onVerifyAndNext: (segment: SubtitleSegment) => void;
   onUpdateSegmentText: (id: number, newText: string) => void;
   onUpdateSegmentStatus: (id: number, status: SubtitleSegment['status']) => void;
   onRevertSegment: (id: number) => void;
   autoScroll: boolean;
+  editingSegmentId?: number | null;
+  onClearEditingSegmentId?: () => void;
 }
 
 export default function TranscriptList({
   segments,
   activeSegmentId,
   onSelectSegment,
+  onReplaySegment,
+  onVerifyAndNext,
   onUpdateSegmentText,
   onUpdateSegmentStatus,
   onRevertSegment,
-  autoScroll
+  autoScroll,
+  editingSegmentId,
+  onClearEditingSegmentId
 }: TranscriptListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [speakerFilter, setSpeakerFilter] = useState<string>('all');
@@ -51,6 +55,17 @@ export default function TranscriptList({
 
   const activeItemRef = useRef<HTMLDivElement>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
+
+  // Sync external edit request from MediaPlayer panel
+  useEffect(() => {
+    if (editingSegmentId) {
+      const seg = segments.find(s => s.id === editingSegmentId);
+      if (seg) {
+        startEdit(seg);
+      }
+      if (onClearEditingSegmentId) onClearEditingSegmentId();
+    }
+  }, [editingSegmentId, segments, onClearEditingSegmentId]);
 
   // Auto-scroll to active segment
   useEffect(() => {
@@ -105,15 +120,6 @@ export default function TranscriptList({
 
   const toggleShowOriginal = (id: number) => {
     setShowOriginalMap((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
-
-  const handleVerifyAndNext = (seg: SubtitleSegment) => {
-    onUpdateSegmentStatus(seg.id, 'verified');
-    const currentIndex = segments.findIndex((s) => s.id === seg.id);
-    if (currentIndex >= 0 && currentIndex < segments.length - 1) {
-      const nextSeg = segments[currentIndex + 1];
-      onSelectSegment(nextSeg, true);
-    }
   };
 
   return (
@@ -231,18 +237,18 @@ export default function TranscriptList({
                 ref={isActive ? activeItemRef : null}
                 className={`group relative rounded-xl p-3 sm:p-4 transition-all duration-200 border ${
                   isActive
-                    ? 'bg-blue-950/30 border-blue-500 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500/40 active-segment-glow'
+                    ? 'bg-blue-950/35 border-blue-500 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500/40 active-segment-glow'
                     : 'bg-slate-900/60 hover:bg-slate-800/40 border-slate-800'
                 }`}
               >
-                {/* Top Row: Timestamp, Speaker, Status Pill, Snippet Play */}
+                {/* Top Row: Timestamp, Speaker, Status Pill, Snippet Play, Tekrar Dinle */}
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   
                   {/* Left: Play Snippet & Timestamp */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center flex-wrap gap-2">
                     <button
                       onClick={() => onSelectSegment(seg, true)}
-                      title="Bu Cümleyi Çal / Buraya Atla"
+                      title="Bu Cümleye Atla ve Oynat"
                       className={`px-2.5 py-1 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition ${
                         isActive
                           ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/30'
@@ -252,6 +258,16 @@ export default function TranscriptList({
                       <Play className="w-3 h-3 fill-current" />
                       <span>{seg.startStr} - {seg.endStr}</span>
                       <span className="text-[10px] opacity-70">({seg.endTime - seg.startTime}s)</span>
+                    </button>
+
+                    {/* TEKRAR DİNLE BUTTON ON SEGMENT */}
+                    <button
+                      onClick={() => onReplaySegment(seg)}
+                      title="Bu Cümleyi Baştan Tekrar Dinle"
+                      className="px-2 py-1 rounded-lg bg-indigo-950/60 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/30 text-xs font-medium transition flex items-center gap-1 active:scale-95"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Tekrar Dinle</span>
                     </button>
 
                     {/* Speaker Badge */}
@@ -306,7 +322,7 @@ export default function TranscriptList({
 
                     {/* Quick Verify & Next Button */}
                     <button
-                      onClick={() => handleVerifyAndNext(seg)}
+                      onClick={() => onVerifyAndNext(seg)}
                       title="Onayla ve Sonraki Cümleye Geç"
                       className="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-medium transition flex items-center gap-1 active:scale-95"
                     >
@@ -364,7 +380,6 @@ export default function TranscriptList({
                         onClick={() => toggleShowOriginal(seg.id)}
                         className="text-slate-400 hover:text-slate-300 flex items-center gap-1 font-medium"
                       >
-                        {showOriginal ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                         <span>Orijinal transkript metnini {showOriginal ? 'gizle' : 'göster'}</span>
                       </button>
 

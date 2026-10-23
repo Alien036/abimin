@@ -15,10 +15,15 @@ import {
   Minimize2,
   ChevronLeft,
   ChevronRight,
-  Sliders,
   Radio,
   FileAudio,
-  Film
+  Film,
+  CheckCircle2,
+  AlertTriangle,
+  Headphones,
+  Check,
+  ShieldCheck,
+  Edit3
 } from 'lucide-react';
 import { SubtitleSegment } from '../lib/initialData';
 import { secondsToTimeStr } from '../lib/transcriptUtils';
@@ -34,12 +39,18 @@ interface MediaPlayerProps {
   onSeek: (time: number) => void;
   onPrevSegment: () => void;
   onNextSegment: () => void;
+  onReplaySegment: (segment: SubtitleSegment) => void;
+  onVerifyAndNext: (segment: SubtitleSegment) => void;
+  onFlagSegment: (id: number) => void;
+  onStartEditSegment: (segment: SubtitleSegment) => void;
   isLoopingSegment: boolean;
   onToggleLoopSegment: () => void;
   autoScroll: boolean;
   onToggleAutoScroll: () => void;
   isSticky: boolean;
   onToggleSticky: () => void;
+  stepByStepMode: boolean;
+  onToggleStepByStep: () => void;
 }
 
 export default function MediaPlayer({
@@ -53,40 +64,54 @@ export default function MediaPlayer({
   onSeek,
   onPrevSegment,
   onNextSegment,
+  onReplaySegment,
+  onVerifyAndNext,
+  onFlagSegment,
+  onStartEditSegment,
   isLoopingSegment,
   onToggleLoopSegment,
   autoScroll,
   onToggleAutoScroll,
   isSticky,
-  onToggleSticky
+  onToggleSticky,
+  stepByStepMode,
+  onToggleStepByStep
 }: MediaPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [mediaSrc, setMediaSrc] = useState<string | null>(null);
-  const [mediaType, setMediaType] = useState<'video' | 'audio' | 'simulated'>('simulated');
-  const [mediaFileName, setMediaFileName] = useState<string>('Simüle Edilmiş Test Oynatıcısı (Ses/Video Bekleniyor)');
+  // Set default audio to converted gorusme.mp3
+  const [mediaSrc, setMediaSrc] = useState<string | null>('/audio/gorusme.mp3');
+  const [mediaType, setMediaType] = useState<'video' | 'audio' | 'simulated'>('audio');
+  const [mediaFileName, setMediaFileName] = useState<string>('Görüşme Kaydı (danışan.mp3)');
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [volume, setVolume] = useState<number>(1.0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [showSubtitleOverlay, setShowSubtitleOverlay] = useState<boolean>(true);
 
-  // Fallback simulation timer if no media file loaded
+  // Check if current segment reached its end in step-by-step mode
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    if (mediaType === 'simulated' && isPlaying) {
-      interval = setInterval(() => {
-        onTimeUpdate(currentTime + 0.25 * playbackRate);
-      }, 250);
+    if (stepByStepMode && activeSegment && isPlaying) {
+      if (currentTime >= activeSegment.endTime) {
+        // Automatically pause at segment boundary
+        handlePause();
+        onSeek(activeSegment.endTime);
+      }
     }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [mediaType, isPlaying, currentTime, playbackRate, onTimeUpdate]);
+  }, [stepByStepMode, activeSegment, isPlaying, currentTime]);
 
-  // Audio Visualizer effect for audio or simulated mode
+  // Handle segment looping logic if looping mode is on
+  useEffect(() => {
+    if (isLoopingSegment && activeSegment && isPlaying) {
+      if (currentTime >= activeSegment.endTime || currentTime < activeSegment.startTime) {
+        handleSeek(activeSegment.startTime);
+      }
+    }
+  }, [currentTime, isLoopingSegment, activeSegment, isPlaying]);
+
+  // Audio Visualizer effect
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -142,15 +167,6 @@ export default function MediaPlayer({
     };
   }, [isPlaying, playbackRate, activeSegment]);
 
-  // Handle segment looping logic
-  useEffect(() => {
-    if (isLoopingSegment && activeSegment && isPlaying) {
-      if (currentTime >= activeSegment.endTime || currentTime < activeSegment.startTime) {
-        handleSeek(activeSegment.startTime);
-      }
-    }
-  }, [currentTime, isLoopingSegment, activeSegment, isPlaying]);
-
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
@@ -161,33 +177,33 @@ export default function MediaPlayer({
       const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(file.name);
       setMediaType(isVideo ? 'video' : 'audio');
       handleSeek(0);
-      onPlay();
+      handlePlay();
     }
   };
 
-  const handlePlayPause = () => {
+  const handlePlay = () => {
     if (mediaType === 'video' && videoRef.current) {
-      if (isPlaying) {
-        videoRef.current.pause();
-        onPause();
-      } else {
-        videoRef.current.play().catch(() => {});
-        onPlay();
-      }
+      videoRef.current.play().catch(() => {});
     } else if (mediaType === 'audio' && audioRef.current) {
-      if (isPlaying) {
-        audioRef.current.pause();
-        onPause();
-      } else {
-        audioRef.current.play().catch(() => {});
-        onPlay();
-      }
+      audioRef.current.play().catch(() => {});
+    }
+    onPlay();
+  };
+
+  const handlePause = () => {
+    if (mediaType === 'video' && videoRef.current) {
+      videoRef.current.pause();
+    } else if (mediaType === 'audio' && audioRef.current) {
+      audioRef.current.pause();
+    }
+    onPause();
+  };
+
+  const handlePlayPause = () => {
+    if (isPlaying) {
+      handlePause();
     } else {
-      if (isPlaying) {
-        onPause();
-      } else {
-        onPlay();
-      }
+      handlePlay();
     }
   };
 
@@ -237,6 +253,7 @@ export default function MediaPlayer({
 
   const maxDuration = duration > 0 ? duration : 2583;
   const progressRatio = Math.min(1, Math.max(0, currentTime / maxDuration));
+  const isSegmentCompleted = activeSegment && currentTime >= activeSegment.endTime;
 
   return (
     <div
@@ -244,9 +261,9 @@ export default function MediaPlayer({
         isSticky
           ? 'sticky top-[68px] z-30 shadow-2xl ring-1 ring-blue-500/30'
           : 'relative'
-      } rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-xl`}
+      } rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-xl space-y-0`}
     >
-      {/* Hidden File Input */}
+      {/* Hidden File Input for uploading custom video/audio */}
       <input
         type="file"
         ref={fileInputRef}
@@ -274,13 +291,14 @@ export default function MediaPlayer({
         {/* Audio Mode or Simulated Mode with Dynamic Waves */}
         {mediaType !== 'video' && (
           <div className="relative w-full h-full flex flex-col items-center justify-center p-6 bg-gradient-to-b from-slate-900/60 via-slate-950 to-slate-900">
-            {mediaType === 'audio' && mediaSrc && (
+            {mediaSrc && (
               <audio
                 ref={audioRef}
                 src={mediaSrc}
                 onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
                 onPlay={onPlay}
                 onPause={onPause}
+                preload="auto"
                 className="hidden"
               />
             )}
@@ -312,7 +330,7 @@ export default function MediaPlayer({
                       : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
                   }`}
                 >
-                  {activeSegment.speaker} Konuşuyor ({activeSegment.startStr} - {activeSegment.endStr})
+                  {activeSegment.speaker} ({activeSegment.startStr} - {activeSegment.endStr})
                 </span>
               </div>
             )}
@@ -339,12 +357,13 @@ export default function MediaPlayer({
           </div>
         )}
 
-        {/* Top Floating Controls on Video */}
+        {/* Top Floating Controls on Player */}
         <div className="absolute top-3 left-3 right-3 flex items-center justify-between opacity-90 group-hover:opacity-100 transition-opacity z-20">
           <div className="flex items-center gap-2">
             <button
               onClick={() => fileInputRef.current?.click()}
               className="px-3 py-1.5 rounded-lg bg-black/60 hover:bg-black/90 backdrop-blur-sm border border-white/15 text-slate-200 hover:text-white text-xs font-medium transition flex items-center gap-1.5 shadow"
+              title="Farklı video/ses yüklemek için tıklayın"
             >
               {mediaType === 'video' ? <Film className="w-3.5 h-3.5 text-blue-400" /> : <FileAudio className="w-3.5 h-3.5 text-emerald-400" />}
               <span className="truncate max-w-[180px] sm:max-w-xs">{mediaFileName}</span>
@@ -454,18 +473,30 @@ export default function MediaPlayer({
             <ChevronRight className="w-4 h-4" />
           </button>
 
+          {/* Dedicated REPLAY SEGMENT BUTTON */}
+          {activeSegment && (
+            <button
+              onClick={() => onReplaySegment(activeSegment)}
+              title="Bu Cümleyi Baştan Tekrar Dinle"
+              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition flex items-center gap-1.5 active:scale-95"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Tekrar Dinle</span>
+            </button>
+          )}
+
           {/* Loop Current Segment */}
           <button
             onClick={onToggleLoopSegment}
             title="Aktif Cümleyi Sürekli Tekrarla / Döngüye Al"
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition flex items-center gap-1.5 ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition flex items-center gap-1.5 ${
               isLoopingSegment
                 ? 'bg-blue-500/20 text-blue-400 border-blue-500/40 shadow-sm shadow-blue-500/20 animate-pulse'
                 : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
             }`}
           >
             <Repeat className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Cümleyi Döngüle</span>
+            <span className="hidden sm:inline">Döngüle</span>
           </button>
         </div>
 
@@ -486,8 +517,22 @@ export default function MediaPlayer({
           ))}
         </div>
 
-        {/* Right: Volume & Options */}
+        {/* Right: Mode Toggles & Volume */}
         <div className="flex items-center gap-3">
+          {/* Step-by-Step Mode Toggle */}
+          <button
+            onClick={onToggleStepByStep}
+            title="Cümle Bittiğinde Dur ve Onay Bekle Modu"
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition flex items-center gap-1.5 ${
+              stepByStepMode
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-500/10'
+                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+            <span>Adım Adım Kontrol</span>
+          </button>
+
           {/* Auto-scroll Toggle */}
           <button
             onClick={onToggleAutoScroll}
@@ -498,7 +543,7 @@ export default function MediaPlayer({
                 : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
             }`}
           >
-            <Radio className={`w-3.5 h-3.5 ${autoScroll ? 'text-emerald-400 animate-spin' : ''}`} />
+            <Radio className={`w-3.5 h-3.5 ${autoScroll ? 'text-emerald-400' : ''}`} />
             <span className="hidden md:inline">Oto-Kaydır</span>
           </button>
 
@@ -529,23 +574,117 @@ export default function MediaPlayer({
 
       </div>
 
-      {/* Helpful Hint banner when media not loaded */}
-      {mediaType === 'simulated' && (
-        <div className="px-4 py-2 bg-blue-950/40 border-t border-blue-900/30 flex items-center justify-between text-xs text-blue-300">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-3.5 h-3.5 text-blue-400" />
-            <span>
-              Kendi videonuzu/ses kaydınızı yükleyerek senkronize çalışabilirsiniz (.mp4, .mp3 vs.)
-            </span>
+      {/* DEDICATED GUIDED REVIEW & REPLAY PANEL (Visible when active segment is selected) */}
+      {activeSegment && (
+        <div className={`p-4 border-t transition-all ${
+          isSegmentCompleted
+            ? 'bg-blue-950/70 border-blue-500/60 shadow-inner'
+            : 'bg-slate-950/80 border-slate-800'
+        }`}>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-2.5">
+            <div className="flex items-center gap-2">
+              <Headphones className={`w-4 h-4 ${isSegmentCompleted ? 'text-blue-400 animate-bounce' : 'text-slate-400'}`} />
+              <span className="text-xs font-bold tracking-wide uppercase text-slate-300">
+                {isSegmentCompleted ? (
+                  <span className="text-blue-300">Cümle Tamamlandı — Onaylanmadan Yeni Yere Geçilmez</span>
+                ) : (
+                  <span>Şu Anda İncelenen Cümle #{activeSegment.id}</span>
+                )}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
+              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800">
+                {activeSegment.startStr} - {activeSegment.endStr}
+              </span>
+              <span className="text-slate-500">({activeSegment.endTime - activeSegment.startTime} sn)</span>
+            </div>
           </div>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="text-xs font-semibold text-blue-400 hover:text-blue-300 underline underline-offset-2"
-          >
-            Dosya Seç
-          </button>
+
+          {/* Sentence Content Box */}
+          <div className="p-3 rounded-xl bg-slate-900 border border-slate-800/80 mb-3">
+            <div className="flex items-center gap-2 mb-1">
+              <span
+                className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${
+                  activeSegment.speaker === 'Danışman'
+                    ? 'bg-sky-500/10 text-sky-400 border-sky-500/30'
+                    : activeSegment.speaker === 'Danışan'
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                }`}
+              >
+                {activeSegment.speaker}
+              </span>
+              {activeSegment.status === 'verified' && (
+                <span className="text-[11px] text-emerald-400 flex items-center gap-1">
+                  <Check className="w-3 h-3" /> Onaylandı
+                </span>
+              )}
+            </div>
+            <p className="text-sm font-medium text-slate-100 leading-relaxed">
+              {activeSegment.text}
+            </p>
+          </div>
+
+          {/* Action Buttons: TEKRAR DİNLE, ONAYLA & İLERLE, METNİ DÜZELT */}
+          <div className="flex flex-wrap items-center gap-2">
+            
+            {/* Tekrar Dinle Button */}
+            <button
+              onClick={() => onReplaySegment(activeSegment)}
+              className="flex-1 min-w-[130px] px-3.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/30 transition transform active:scale-95"
+            >
+              <RotateCcw className="w-4 h-4" />
+              <span>Tekrar Dinle</span>
+            </button>
+
+            {/* Onayla ve Sonrakine Geç */}
+            <button
+              onClick={() => onVerifyAndNext(activeSegment)}
+              className="flex-1 min-w-[150px] px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition transform active:scale-95"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Onayla & Sonrakine Geç</span>
+            </button>
+
+            {/* Metni Düzelt */}
+            <button
+              onClick={() => onStartEditSegment(activeSegment)}
+              className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition flex items-center gap-1.5"
+            >
+              <Edit3 className="w-3.5 h-3.5 text-blue-400" />
+              <span>Metni Düzelt</span>
+            </button>
+
+            {/* Şüpheli Olarak İşaretle */}
+            <button
+              onClick={() => onFlagSegment(activeSegment.id)}
+              className="px-3 py-2.5 rounded-xl bg-amber-950/40 hover:bg-amber-600 hover:text-white text-amber-300 border border-amber-500/30 text-xs font-medium transition flex items-center gap-1.5"
+              title="Şüpheli / Emin Olunamadı olarak işaretle"
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Şüpheli</span>
+            </button>
+
+          </div>
         </div>
       )}
+
+      {/* Audio Loaded notification banner */}
+      <div className="px-4 py-2 bg-emerald-950/30 border-t border-emerald-900/30 flex items-center justify-between text-xs text-emerald-300">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+          <span>
+            43 dakikalık orijinal görüşme ses kaydı yüklü ve kullanıma hazır.
+          </span>
+        </div>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="text-xs font-semibold text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
+        >
+          Farklı Dosya Seç
+        </button>
+      </div>
+
     </div>
   );
 }
