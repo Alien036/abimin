@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useEffect, memo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import {
   Search,
   Check,
@@ -16,6 +16,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { SubtitleSegment } from '../lib/initialData';
+import { audioManager } from '../lib/audioManager';
 
 interface SegmentCardProps {
   seg: SubtitleSegment;
@@ -28,6 +29,7 @@ interface SegmentCardProps {
   onVerifyAndNext: (segment: SubtitleSegment) => void;
   onUpdateSegmentStatus: (id: number, status: SubtitleSegment['status']) => void;
   onRevertSegment: (id: number) => void;
+  onHoverSegment: (id: number) => void;
   startEdit: (seg: SubtitleSegment) => void;
   saveEdit: (id: number) => void;
   cancelEdit: () => void;
@@ -47,6 +49,7 @@ const SegmentCard = memo(function SegmentCard({
   onVerifyAndNext,
   onUpdateSegmentStatus,
   onRevertSegment,
+  onHoverSegment,
   startEdit,
   saveEdit,
   cancelEdit,
@@ -62,7 +65,8 @@ const SegmentCard = memo(function SegmentCard({
   return (
     <div
       ref={isActive && activeItemRef ? activeItemRef : null}
-      className={`group relative rounded-xl p-3 sm:p-4 transition-all duration-150 border ${
+      onMouseEnter={() => onHoverSegment(seg.id)}
+      className={`group relative rounded-xl p-3 sm:p-4 transition-colors duration-150 border ${
         isActive
           ? 'bg-blue-950/40 border-blue-500 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500/40 active-segment-glow'
           : 'bg-slate-900/60 hover:bg-slate-800/40 border-slate-800'
@@ -291,7 +295,7 @@ interface TranscriptListProps {
   onClearEditingSegmentId?: () => void;
 }
 
-export default function TranscriptList({
+const TranscriptList = memo(function TranscriptList({
   segments,
   activeSegmentId,
   onSelectSegment,
@@ -310,6 +314,9 @@ export default function TranscriptList({
   
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
+  const editTextRef = useRef('');
+  editTextRef.current = editText;
+
   const [showOriginalMap, setShowOriginalMap] = useState<Record<number, boolean>>({});
 
   const activeItemRef = useRef<HTMLDivElement>(null);
@@ -337,47 +344,54 @@ export default function TranscriptList({
     }
   }, [activeSegmentId, autoScroll]);
 
-  // Filtered segments
-  const filteredSegments = segments.filter((seg) => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      const inText = seg.text.toLowerCase().includes(q);
-      const inSpeaker = seg.speaker.toLowerCase().includes(q);
-      const inTime = `${seg.startStr} ${seg.endStr}`.includes(q);
-      if (!inText && !inSpeaker && !inTime) return false;
-    }
+  // Memoized filtered segments so filtering only runs when segments or filters change
+  const filteredSegments = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return segments.filter((seg) => {
+      if (q) {
+        const inText = seg.text.toLowerCase().includes(q);
+        const inSpeaker = seg.speaker.toLowerCase().includes(q);
+        const inTime = `${seg.startStr} ${seg.endStr}`.includes(q);
+        if (!inText && !inSpeaker && !inTime) return false;
+      }
 
-    if (speakerFilter !== 'all') {
-      if (speakerFilter === 'Danışman' && seg.speaker !== 'Danışman') return false;
-      if (speakerFilter === 'Danışan' && seg.speaker !== 'Danışan') return false;
-      if (speakerFilter === 'Not / Efekt' && seg.speaker !== 'Not / Efekt' && seg.speaker !== 'Not') return false;
-    }
+      if (speakerFilter !== 'all') {
+        if (speakerFilter === 'Danışman' && seg.speaker !== 'Danışman') return false;
+        if (speakerFilter === 'Danışan' && seg.speaker !== 'Danışan') return false;
+        if (speakerFilter === 'Not / Efekt' && seg.speaker !== 'Not / Efekt' && seg.speaker !== 'Not') return false;
+      }
 
-    if (statusFilter !== 'all') {
-      if (seg.status !== statusFilter) return false;
-    }
+      if (statusFilter !== 'all') {
+        if (seg.status !== statusFilter) return false;
+      }
 
-    return true;
-  });
+      return true;
+    });
+  }, [segments, searchQuery, speakerFilter, statusFilter]);
 
-  const startEdit = (seg: SubtitleSegment) => {
+  // Stable callbacks so React.memo(SegmentCard) is never invalidated across all 189 items
+  const startEdit = useCallback((seg: SubtitleSegment) => {
     setEditingId(seg.id);
     setEditText(seg.text);
-  };
+  }, []);
 
-  const saveEdit = (id: number) => {
-    onUpdateSegmentText(id, editText);
+  const saveEdit = useCallback((id: number) => {
+    onUpdateSegmentText(id, editTextRef.current);
     setEditingId(null);
-  };
+  }, [onUpdateSegmentText]);
 
-  const cancelEdit = () => {
+  const cancelEdit = useCallback(() => {
     setEditingId(null);
     setEditText('');
-  };
+  }, []);
 
-  const toggleShowOriginal = (id: number) => {
+  const toggleShowOriginal = useCallback((id: number) => {
     setShowOriginalMap((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
+  }, []);
+
+  const handleHoverSegment = useCallback((id: number) => {
+    audioManager.preloadHover(id);
+  }, []);
 
   return (
     <div className="w-full flex flex-col rounded-2xl bg-slate-900 border border-slate-800 shadow-xl overflow-hidden">
@@ -479,30 +493,37 @@ export default function TranscriptList({
             </button>
           </div>
         ) : (
-          filteredSegments.map((seg) => (
-            <SegmentCard
-              key={seg.id}
-              seg={seg}
-              isActive={activeSegmentId === seg.id}
-              isEditing={editingId === seg.id}
-              showOriginal={!!showOriginalMap[seg.id]}
-              editText={editText}
-              onSelectSegment={onSelectSegment}
-              onReplaySegment={onReplaySegment}
-              onVerifyAndNext={onVerifyAndNext}
-              onUpdateSegmentStatus={onUpdateSegmentStatus}
-              onRevertSegment={onRevertSegment}
-              startEdit={startEdit}
-              saveEdit={saveEdit}
-              cancelEdit={cancelEdit}
-              setEditText={setEditText}
-              toggleShowOriginal={toggleShowOriginal}
-              activeItemRef={activeSegmentId === seg.id ? activeItemRef : null}
-            />
-          ))
+          filteredSegments.map((seg) => {
+            const isActive = activeSegmentId === seg.id;
+            const isEditing = editingId === seg.id;
+            return (
+              <SegmentCard
+                key={seg.id}
+                seg={seg}
+                isActive={isActive}
+                isEditing={isEditing}
+                showOriginal={!!showOriginalMap[seg.id]}
+                editText={isEditing ? editText : ''}
+                onSelectSegment={onSelectSegment}
+                onReplaySegment={onReplaySegment}
+                onVerifyAndNext={onVerifyAndNext}
+                onUpdateSegmentStatus={onUpdateSegmentStatus}
+                onRevertSegment={onRevertSegment}
+                onHoverSegment={handleHoverSegment}
+                startEdit={startEdit}
+                saveEdit={saveEdit}
+                cancelEdit={cancelEdit}
+                setEditText={setEditText}
+                toggleShowOriginal={toggleShowOriginal}
+                activeItemRef={isActive ? activeItemRef : null}
+              />
+            );
+          })
         )}
       </div>
 
     </div>
   );
-}
+});
+
+export default TranscriptList;

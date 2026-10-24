@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, memo } from 'react';
 import {
   Play,
   Pause,
@@ -10,7 +10,6 @@ import {
   VolumeX,
   Repeat,
   Upload,
-  Sparkles,
   Maximize2,
   Minimize2,
   ChevronLeft,
@@ -36,6 +35,7 @@ interface MediaPlayerProps {
   currentTime: number;
   duration: number;
   isPlaying: boolean;
+  replayNonce: number;
   onTimeUpdate: (time: number) => void;
   onPlay: () => void;
   onPause: () => void;
@@ -56,12 +56,13 @@ interface MediaPlayerProps {
   onToggleStepByStep: () => void;
 }
 
-export default function MediaPlayer({
+const MediaPlayer = memo(function MediaPlayer({
   activeSegment,
   totalSegmentsCount,
   currentTime,
   duration,
   isPlaying,
+  replayNonce,
   onTimeUpdate,
   onPlay,
   onPause,
@@ -96,75 +97,148 @@ export default function MediaPlayer({
   const [volume, setVolume] = useState<number>(1.0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [showSubtitleOverlay, setShowSubtitleOverlay] = useState<boolean>(true);
-  const [segmentLocalTime, setSegmentLocalTime] = useState<number>(0);
   const [segmentEnded, setSegmentEnded] = useState<boolean>(false);
 
-  // Play active segment via audioManager when triggered
+  // Preload status state from audioManager
+  const [cachedCount, setCachedCount] = useState<number>(0);
+  const [isBuffering, setIsBuffering] = useState<boolean>(false);
+
+  // Keep latest mutable props/state in a ref so audio callbacks never become stale
+  // and never cause useEffect to re-trigger playback on timeupdate/volume/speed changes!
+  const latestRef = useRef({
+    activeSegment,
+    playbackRate,
+    volume,
+    isMuted,
+    isLoopingSegment,
+    stepByStepMode,
+    onPause,
+    onTimeUpdate,
+    onVerifyAndNext
+  });
+
+  latestRef.current = {
+    activeSegment,
+    playbackRate,
+    volume,
+    isMuted,
+    isLoopingSegment,
+    stepByStepMode,
+    onPause,
+    onTimeUpdate,
+    onVerifyAndNext
+  };
+
+  // Track which segment and replayNonce were last started to avoid duplicate play() calls
+  const lastPlayedSegmentIdRef = useRef<number | null>(null);
+  const lastReplayNonceRef = useRef<number>(replayNonce);
+  const lastTimeEmitRef = useRef<number>(0);
+
+  // Subscribe to RAM cache status
+  useEffect(() => {
+    return audioManager.subscribe((cached, _total, buffering) => {
+      setCachedCount(cached);
+      setIsBuffering(buffering);
+    });
+  }, []);
+
+  // Stable function to play a segment via audioManager (never changes reference!)
   const playActiveSegmentAudio = useCallback((seg: SubtitleSegment) => {
+    const { playbackRate: rate, volume: vol, isMuted: muted } = latestRef.current;
     setSegmentEnded(false);
+    lastPlayedSegmentIdRef.current = seg.id;
+
     audioManager.playSegment(seg.id, {
-      playbackRate,
-      volume: isMuted ? 0 : volume,
+      playbackRate: rate,
+      volume: muted ? 0 : vol,
       onEnded: () => {
-        setSegmentEnded(true);
-        if (isLoopingSegment) {
+        const cur = latestRef.current;
+        if (cur.isLoopingSegment) {
+          setSegmentEnded(false);
           audioManager.replay();
-        } else if (stepByStepMode) {
-          onPause();
-          onTimeUpdate(seg.endTime);
+        } else if (cur.stepByStepMode) {
+          setSegmentEnded(true);
+          cur.onPause();
+          cur.onTimeUpdate(seg.endTime);
         } else {
-          onVerifyAndNext(seg);
+          setSegmentEnded(true);
+          cur.onVerifyAndNext(seg);
         }
       },
       onTimeUpdate: (curr) => {
-        setSegmentLocalTime(curr);
-        onTimeUpdate(seg.startTime + curr);
+        // Throttle parent timeupdate state to ~12fps (80ms) to avoid React re-render storms
+        const now = performance.now();
+        if (now - lastTimeEmitRef.current >= 80) {
+          lastTimeEmitRef.current = now;
+          latestRef.current.onTimeUpdate(seg.startTime + curr);
+        }
       }
     });
-  }, [playbackRate, volume, isMuted, isLoopingSegment, stepByStepMode, onPause, onTimeUpdate, onVerifyAndNext]);
+  }, []);
 
-  // When active segment changes and isPlaying is true, play immediately from memory
+  // Preload active segment and neighbors whenever activeSegment.id changes
   useEffect(() => {
     if (engineMode === 'segment' && activeSegment && !customMediaSrc) {
-      // Preload current and next 4 segments immediately
-      audioManager.preload(activeSegment.id);
-      audioManager.preloadAhead(activeSegment.id, 4);
+      audioManager.preloadAhead(activeSegment.id, 6);
+    }
+  }, [activeSegment?.id, engineMode, customMediaSrc]);
 
-      if (isPlaying) {
+  // Handle segment transitions, play/pause state transitions, and explicit replay triggers
+  useEffect(() => {
+    if (engineMode !== 'segment' || !activeSegment || customMediaSrc) return;
+
+    const replayTriggered = replayNonce !== lastReplayNonceRef.current;
+    const segmentChanged = activeSegment.id !== lastPlayedSegmentIdRef.current;
+
+    if (replayTriggered) {
+      lastReplayNonceRef.current = replayNonce;
+      playActiveSegmentAudio(activeSegment);
+      return;
+    }
+
+    if (isPlaying) {
+      if (segmentChanged || segmentEnded) {
+        playActiveSegmentAudio(activeSegment);
+      } else if (audioManager.getCurrentId() === activeSegment.id) {
+        audioManager.resume();
+      } else {
         playActiveSegmentAudio(activeSegment);
       }
+    } else {
+      audioManager.pause();
     }
-  }, [activeSegment?.id, engineMode, customMediaSrc, isPlaying, playActiveSegmentAudio]);
+  }, [activeSegment, engineMode, customMediaSrc, isPlaying, replayNonce, segmentEnded, playActiveSegmentAudio]);
 
-  // Canvas visualizer animation
+  // Reset segmentEnded when switching to a different segment while paused
+  useEffect(() => {
+    setSegmentEnded(false);
+  }, [activeSegment?.id]);
+
+  // Optimized Canvas visualizer animation:
+  // - Only runs 60fps loop when actively playing; draws 1 static frame and sleeps when paused!
+  // - Reuses single gradient per frame instead of allocating 48 gradients per frame.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let animationFrameId: number;
+    let animationFrameId: number | null = null;
     let phase = 0;
+    const activelyAnimating = isPlaying && !segmentEnded;
 
-    const render = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const drawFrame = () => {
       const width = canvas.width;
       const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+
       const bars = 48;
       const barWidth = width / bars - 2;
+      const isDanisman = activeSegment?.speaker === 'Danışman';
 
-      for (let i = 0; i < bars; i++) {
-        let barHeight = 8;
-        if (isPlaying && !segmentEnded) {
-          const factor = Math.sin(phase + i * 0.25) * 0.5 + 0.5;
-          barHeight = Math.max(6, factor * (height * 0.75));
-        }
-
-        const x = i * (barWidth + 2);
-        const y = (height - barHeight) / 2;
-
-        const isDanisman = activeSegment?.speaker === 'Danışman';
-        const gradient = ctx.createLinearGradient(0, y, 0, y + barHeight);
+      let fillStyle: string | CanvasGradient = 'rgba(100, 116, 139, 0.35)';
+      if (activelyAnimating) {
+        const gradient = ctx.createLinearGradient(0, 0, 0, height);
         if (isDanisman) {
           gradient.addColorStop(0, '#38bdf8');
           gradient.addColorStop(1, '#0284c7');
@@ -172,25 +246,39 @@ export default function MediaPlayer({
           gradient.addColorStop(0, '#34d399');
           gradient.addColorStop(1, '#059669');
         }
+        fillStyle = gradient;
+      }
+      ctx.fillStyle = fillStyle;
 
-        ctx.fillStyle = isPlaying && !segmentEnded ? gradient : 'rgba(100, 116, 139, 0.4)';
+      for (let i = 0; i < bars; i++) {
+        let barHeight = 8;
+        if (activelyAnimating) {
+          const factor = Math.sin(phase + i * 0.25) * 0.5 + 0.5;
+          barHeight = Math.max(6, factor * (height * 0.75));
+        }
+
+        const x = i * (barWidth + 2);
+        const y = (height - barHeight) / 2;
+
         ctx.beginPath();
         ctx.roundRect(x, y, barWidth, barHeight, 3);
         ctx.fill();
       }
 
-      if (isPlaying && !segmentEnded) {
+      if (activelyAnimating) {
         phase += 0.12 * playbackRate;
+        animationFrameId = requestAnimationFrame(drawFrame);
       }
-      animationFrameId = requestAnimationFrame(render);
     };
 
-    render();
+    drawFrame();
 
     return () => {
-      cancelAnimationFrame(animationFrameId);
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
     };
-  }, [isPlaying, playbackRate, activeSegment, segmentEnded]);
+  }, [isPlaying, playbackRate, activeSegment?.speaker, segmentEnded]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -213,10 +301,14 @@ export default function MediaPlayer({
     } else if (engineMode === 'continuous' && continuousAudioRef.current) {
       continuousAudioRef.current.play().catch(() => {});
     } else if (engineMode === 'segment' && activeSegment) {
-      playActiveSegmentAudio(activeSegment);
+      if (segmentEnded || audioManager.getCurrentId() !== activeSegment.id) {
+        playActiveSegmentAudio(activeSegment);
+      } else {
+        audioManager.resume();
+      }
     }
     onPlay();
-  }, [customMediaType, engineMode, activeSegment, playActiveSegmentAudio, onPlay]);
+  }, [customMediaType, engineMode, activeSegment, segmentEnded, playActiveSegmentAudio, onPlay]);
 
   const handlePause = useCallback(() => {
     if (customMediaType === 'video' && videoRef.current) {
@@ -286,6 +378,7 @@ export default function MediaPlayer({
   const maxDuration = duration > 0 ? duration : 2583;
   const progressRatio = Math.min(1, Math.max(0, currentTime / maxDuration));
   const nextSegmentId = activeSegment ? Math.min(totalSegmentsCount, activeSegment.id + 1) : null;
+  const isNextReady = nextSegmentId ? audioManager.isPreloaded(nextSegmentId) : false;
 
   return (
     <div
@@ -370,7 +463,11 @@ export default function MediaPlayer({
                 {engineMode === 'segment' && nextSegmentId && (
                   <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 flex items-center gap-1 shadow-sm">
                     <Zap className="w-3 h-3 text-emerald-400" />
-                    Sonraki Cümle (# {nextSegmentId}) Bellekte Hazır
+                    {isBuffering
+                      ? 'Ses Hazırlanıyor...'
+                      : isNextReady
+                      ? `Sonraki Cümle (#${nextSegmentId}) RAM'de Hazır`
+                      : `RAM Ön-Bellek: ${cachedCount}/${totalSegmentsCount}`}
                   </span>
                 )}
               </div>
@@ -725,7 +822,7 @@ export default function MediaPlayer({
         <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-emerald-400" />
           <span>
-            Hızlı Cümle Modu Aktif: 189 cümle bağımsız mikro-klipler halinde belleğe ön-yüklenir, gecikmesiz çalar.
+            Hızlı Cümle Modu Aktif: Sesler RAM önbellekten ({cachedCount}/{totalSegmentsCount} hazır) 0ms gecikmeyle çalar.
           </span>
         </div>
         <button
@@ -738,4 +835,6 @@ export default function MediaPlayer({
 
     </div>
   );
-}
+});
+
+export default MediaPlayer;

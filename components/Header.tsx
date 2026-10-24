@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useMemo, memo } from 'react';
 import { 
   CheckCircle2, 
   Edit3, 
@@ -10,9 +10,7 @@ import {
   Upload, 
   RotateCcw, 
   Keyboard, 
-  FileText,
-  Video,
-  Sparkles
+  Video
 } from 'lucide-react';
 import { TranscriptMetadata, SubtitleSegment } from '../lib/initialData';
 
@@ -25,7 +23,7 @@ interface HeaderProps {
   onResetAll: () => void;
 }
 
-export default function Header({
+const Header = memo(function Header({
   metadata,
   segments,
   onOpenExport,
@@ -35,13 +33,26 @@ export default function Header({
 }: HeaderProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  const total = segments.length;
-  const verifiedCount = segments.filter(s => s.status === 'verified').length;
-  const editedCount = segments.filter(s => s.status === 'edited').length;
-  const flaggedCount = segments.filter(s => s.status === 'flagged').length;
-  const pendingCount = segments.filter(s => s.status === 'pending').length;
-
-  const progressPercent = total > 0 ? Math.round(((verifiedCount + editedCount) / total) * 100) : 0;
+  const { total, verifiedCount, editedCount, flaggedCount, progressPercent } = useMemo(() => {
+    let verified = 0;
+    let edited = 0;
+    let flagged = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const st = segments[i].status;
+      if (st === 'verified') verified++;
+      else if (st === 'edited') edited++;
+      else if (st === 'flagged') flagged++;
+    }
+    const len = segments.length;
+    const pct = len > 0 ? Math.round(((verified + edited) / len) * 100) : 0;
+    return {
+      total: len,
+      verifiedCount: verified,
+      editedCount: edited,
+      flaggedCount: flagged,
+      progressPercent: pct
+    };
+  }, [segments]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -158,4 +169,6 @@ export default function Header({
       </div>
     </header>
   );
-}
+});
+
+export default Header;

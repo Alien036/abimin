@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Header from '../components/Header';
 import MediaPlayer from '../components/MediaPlayer';
 import TranscriptList from '../components/TranscriptList';
@@ -8,7 +8,8 @@ import ExportModal from '../components/ExportModal';
 import KeyboardShortcutsModal from '../components/KeyboardShortcutsModal';
 import { DEFAULT_TRANSCRIPT_DATA, SubtitleSegment, TranscriptMetadata } from '../lib/initialData';
 import { parseMarkdownTranscript } from '../lib/transcriptUtils';
-import { Info, Sparkles, CheckCircle2, ShieldCheck } from 'lucide-react';
+import { audioManager } from '../lib/audioManager';
+import { Sparkles, CheckCircle2, ShieldCheck } from 'lucide-react';
 
 export default function Home() {
   const [metadata, setMetadata] = useState<TranscriptMetadata>(DEFAULT_TRANSCRIPT_DATA);
@@ -19,18 +20,28 @@ export default function Home() {
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(DEFAULT_TRANSCRIPT_DATA.totalSeconds);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [replayNonce, setReplayNonce] = useState<number>(0);
   const [isLoopingSegment, setIsLoopingSegment] = useState<boolean>(false);
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [isSticky, setIsSticky] = useState<boolean>(false);
   const [stepByStepMode, setStepByStepMode] = useState<boolean>(true); // Active by default!
   const [editingSegmentId, setEditingSegmentId] = useState<number | null>(null);
+  const [currentSegmentId, setCurrentSegmentId] = useState<number>(1);
 
   // Modals & Feedback
   const [isExportOpen, setIsExportOpen] = useState<boolean>(false);
   const [isShortcutsOpen, setIsShortcutsOpen] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load saved state from localStorage after mount
+  // Keep latest state in refs so callbacks remain 100% stable across renders
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
+
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+
+  // Load saved state from localStorage after mount & start audio pre-warming
   useEffect(() => {
     setIsClient(true);
     try {
@@ -45,26 +56,30 @@ export default function Home() {
     } catch (e) {
       console.error('Failed to load saved state:', e);
     }
+    audioManager.startBackgroundWarmup(1);
   }, []);
 
-  // Save changes to localStorage
+  // Debounced non-blocking save to localStorage so segment transitions never lag
   useEffect(() => {
-    if (isClient) {
+    if (!isClient) return;
+    const timer = setTimeout(() => {
       try {
         localStorage.setItem('psiko_sync_segments_v3', JSON.stringify(segments));
         localStorage.setItem('psiko_sync_meta_v3', JSON.stringify(metadata));
       } catch (e) {
         console.error('Failed to save state:', e);
       }
-    }
+    }, 400);
+    return () => clearTimeout(timer);
   }, [segments, metadata, isClient]);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
-  };
-
-  const [currentSegmentId, setCurrentSegmentId] = useState<number>(1);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 3000);
+  }, []);
 
   // Active segment determined explicitly by currentSegmentId
   const activeSegment = useMemo(() => {
@@ -72,6 +87,8 @@ export default function Home() {
   }, [segments, currentSegmentId]);
 
   const activeSegmentId = activeSegment ? activeSegment.id : null;
+  const activeSegmentRef = useRef(activeSegment);
+  activeSegmentRef.current = activeSegment;
 
   // Segment Selection / Jump
   const handleSelectSegment = useCallback((segment: SubtitleSegment, playImmediately = true) => {
@@ -79,6 +96,7 @@ export default function Home() {
     setCurrentTime(segment.startTime);
     if (playImmediately) {
       setIsPlaying(true);
+      setReplayNonce((n) => n + 1);
     }
   }, []);
 
@@ -87,8 +105,9 @@ export default function Home() {
     setCurrentSegmentId(segment.id);
     setCurrentTime(segment.startTime);
     setIsPlaying(true);
+    setReplayNonce((n) => n + 1);
     showToast(`"${segment.speaker}" cümlesi tekrar çalınıyor...`);
-  }, []);
+  }, [showToast]);
 
   // VERIFY & ADVANCE TO NEXT SEGMENT (Onayla ve İlerle)
   const handleVerifyAndNext = useCallback((segment: SubtitleSegment) => {
@@ -96,18 +115,20 @@ export default function Home() {
       prev.map((s) => (s.id === segment.id ? { ...s, status: 'verified' } : s))
     );
 
-    const currentIndex = segments.findIndex((s) => s.id === segment.id);
-    if (currentIndex >= 0 && currentIndex < segments.length - 1) {
-      const nextSeg = segments[currentIndex + 1];
+    const list = segmentsRef.current;
+    const currentIndex = list.findIndex((s) => s.id === segment.id);
+    if (currentIndex >= 0 && currentIndex < list.length - 1) {
+      const nextSeg = list[currentIndex + 1];
       setCurrentSegmentId(nextSeg.id);
       setCurrentTime(nextSeg.startTime);
       setIsPlaying(true);
+      setReplayNonce((n) => n + 1);
       showToast(`Cümle #${segment.id} onaylandı. Sonraki cümleye geçildi.`);
     } else {
       setIsPlaying(false);
       showToast('🎉 Tebrikler! Tüm görüşme cümleleri başarıyla doğrulandı!');
     }
-  }, [segments]);
+  }, [showToast]);
 
   // FLAG SEGMENT (Şüpheli)
   const handleFlagSegment = useCallback((id: number) => {
@@ -115,24 +136,28 @@ export default function Home() {
       prev.map((s) => (s.id === id ? { ...s, status: 'flagged' } : s))
     );
     showToast(`Cümle #${id} şüpheli olarak işaretlendi.`);
-  }, []);
+  }, [showToast]);
 
   // Previous & Next Segment navigation
   const handlePrevSegment = useCallback(() => {
-    if (!activeSegmentId) return;
-    const currentIndex = segments.findIndex((s) => s.id === activeSegmentId);
+    const current = activeSegmentRef.current;
+    if (!current) return;
+    const list = segmentsRef.current;
+    const currentIndex = list.findIndex((s) => s.id === current.id);
     if (currentIndex > 0) {
-      handleSelectSegment(segments[currentIndex - 1], isPlaying);
+      handleSelectSegment(list[currentIndex - 1], isPlayingRef.current);
     }
-  }, [activeSegmentId, segments, handleSelectSegment, isPlaying]);
+  }, [handleSelectSegment]);
 
   const handleNextSegment = useCallback(() => {
-    if (!activeSegmentId) return;
-    const currentIndex = segments.findIndex((s) => s.id === activeSegmentId);
-    if (currentIndex < segments.length - 1) {
-      handleSelectSegment(segments[currentIndex + 1], isPlaying);
+    const current = activeSegmentRef.current;
+    if (!current) return;
+    const list = segmentsRef.current;
+    const currentIndex = list.findIndex((s) => s.id === current.id);
+    if (currentIndex < list.length - 1) {
+      handleSelectSegment(list[currentIndex + 1], isPlayingRef.current);
     }
-  }, [activeSegmentId, segments, handleSelectSegment, isPlaying]);
+  }, [handleSelectSegment]);
 
   // Updating text
   const handleUpdateSegmentText = useCallback((id: number, newText: string) => {
@@ -148,7 +173,7 @@ export default function Home() {
       )
     );
     showToast('Değişiklik kaydedildi');
-  }, []);
+  }, [showToast]);
 
   // Updating status
   const handleUpdateSegmentStatus = useCallback((id: number, status: SubtitleSegment['status']) => {
@@ -171,7 +196,7 @@ export default function Home() {
       )
     );
     showToast('Satır orijinal metne döndürüldü');
-  }, []);
+  }, [showToast]);
 
   // Reset all segments
   const handleResetAll = useCallback(() => {
@@ -181,10 +206,10 @@ export default function Home() {
       try {
         localStorage.removeItem('psiko_sync_segments_v3');
         localStorage.removeItem('psiko_sync_meta_v3');
-      } catch (e) {}
+      } catch {}
       showToast('Transkript başarıyla sıfırlandı');
     }
-  }, []);
+  }, [showToast]);
 
   // Custom Markdown Upload
   const handleUploadMd = useCallback((file: File) => {
@@ -203,13 +228,27 @@ export default function Home() {
           } else {
             alert('Yüklenen dosyada zaman damgalı segment bulunamadı.');
           }
-        } catch (err) {
+        } catch {
           alert('Markdown dosyası işlenirken hata oluştu.');
         }
       }
     };
     reader.readAsText(file, 'utf-8');
-  }, []);
+  }, [showToast]);
+
+  // Stable UI callbacks for child components
+  const handleOpenExport = useCallback(() => setIsExportOpen(true), []);
+  const handleCloseExport = useCallback(() => setIsExportOpen(false), []);
+  const handleOpenShortcuts = useCallback(() => setIsShortcutsOpen(true), []);
+  const handleCloseShortcuts = useCallback(() => setIsShortcutsOpen(false), []);
+  const handlePlay = useCallback(() => setIsPlaying(true), []);
+  const handlePause = useCallback(() => setIsPlaying(false), []);
+  const handleStartEditSegment = useCallback((seg: SubtitleSegment) => setEditingSegmentId(seg.id), []);
+  const handleClearEditingSegmentId = useCallback(() => setEditingSegmentId(null), []);
+  const handleToggleLoopSegment = useCallback(() => setIsLoopingSegment((prev) => !prev), []);
+  const handleToggleAutoScroll = useCallback(() => setAutoScroll((prev) => !prev), []);
+  const handleToggleSticky = useCallback(() => setIsSticky((prev) => !prev), []);
+  const handleToggleStepByStep = useCallback(() => setStepByStepMode((prev) => !prev), []);
 
   // Global Keyboard Shortcuts
   useEffect(() => {
@@ -236,7 +275,7 @@ export default function Home() {
         handleNextSegment();
       } else if (e.key === 'r' || e.key === 'R') {
         e.preventDefault();
-        if (activeSegment) handleReplaySegment(activeSegment);
+        if (activeSegmentRef.current) handleReplaySegment(activeSegmentRef.current);
       } else if (e.key === 'l' || e.key === 'L') {
         e.preventDefault();
         setIsLoopingSegment((prev) => !prev);
@@ -248,7 +287,7 @@ export default function Home() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [duration, handlePrevSegment, handleNextSegment, activeSegment, handleReplaySegment]);
+  }, [duration, handlePrevSegment, handleNextSegment, handleReplaySegment]);
 
   return (
     <div className="min-h-screen flex flex-col bg-[#090d16] text-slate-100">
@@ -257,8 +296,8 @@ export default function Home() {
       <Header
         metadata={metadata}
         segments={segments}
-        onOpenExport={() => setIsExportOpen(true)}
-        onOpenShortcuts={() => setIsShortcutsOpen(true)}
+        onOpenExport={handleOpenExport}
+        onOpenShortcuts={handleOpenShortcuts}
         onUploadMd={handleUploadMd}
         onResetAll={handleResetAll}
       />
@@ -299,24 +338,25 @@ export default function Home() {
               currentTime={currentTime}
               duration={duration}
               isPlaying={isPlaying}
-              onTimeUpdate={(t) => setCurrentTime(t)}
-              onPlay={() => setIsPlaying(true)}
-              onPause={() => setIsPlaying(false)}
-              onSeek={(t) => setCurrentTime(t)}
+              replayNonce={replayNonce}
+              onTimeUpdate={setCurrentTime}
+              onPlay={handlePlay}
+              onPause={handlePause}
+              onSeek={setCurrentTime}
               onPrevSegment={handlePrevSegment}
               onNextSegment={handleNextSegment}
               onReplaySegment={handleReplaySegment}
               onVerifyAndNext={handleVerifyAndNext}
               onFlagSegment={handleFlagSegment}
-              onStartEditSegment={(seg) => setEditingSegmentId(seg.id)}
+              onStartEditSegment={handleStartEditSegment}
               isLoopingSegment={isLoopingSegment}
-              onToggleLoopSegment={() => setIsLoopingSegment(!isLoopingSegment)}
+              onToggleLoopSegment={handleToggleLoopSegment}
               autoScroll={autoScroll}
-              onToggleAutoScroll={() => setAutoScroll(!autoScroll)}
+              onToggleAutoScroll={handleToggleAutoScroll}
               isSticky={isSticky}
-              onToggleSticky={() => setIsSticky(!isSticky)}
+              onToggleSticky={handleToggleSticky}
               stepByStepMode={stepByStepMode}
-              onToggleStepByStep={() => setStepByStepMode(!stepByStepMode)}
+              onToggleStepByStep={handleToggleStepByStep}
             />
 
             {/* Quick Tips & Workflow Guide */}
@@ -352,7 +392,7 @@ export default function Home() {
               onRevertSegment={handleRevertSegment}
               autoScroll={autoScroll}
               editingSegmentId={editingSegmentId}
-              onClearEditingSegmentId={() => setEditingSegmentId(null)}
+              onClearEditingSegmentId={handleClearEditingSegmentId}
             />
           </div>
 
@@ -371,14 +411,14 @@ export default function Home() {
       {/* Modals */}
       <ExportModal
         isOpen={isExportOpen}
-        onClose={() => setIsExportOpen(false)}
+        onClose={handleCloseExport}
         metadata={metadata}
         segments={segments}
       />
 
       <KeyboardShortcutsModal
         isOpen={isShortcutsOpen}
-        onClose={() => setIsShortcutsOpen(false)}
+        onClose={handleCloseShortcuts}
       />
 
       {/* Footer */}
